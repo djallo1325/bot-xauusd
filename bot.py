@@ -1,139 +1,130 @@
-import requests
 import time
+import requests
+from datetime import datetime
 
-# ==== CONFIGURATION ====
+# ⚙️ CONFIGURATION
 TELEGRAM_TOKEN = "8701789147:AAGIbXhBOo5aoNYLr0VveVUVNq7cHC3htXI"
-CHAT_ID = "8076604087"
+CHAT_ID = "8701789147"
 TWELVEDATA_KEY = "9ea69f958d4e4b34abadbd12edcf7fd2"
+CAPITAL = 50
+RISK_PERCENT = 1
 SYMBOL = "XAU/USD"
+INTERVAL = "4h"  # H4 comme convenu
 
-def send_telegram(message):
+def envoyer_message(texte):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    requests.post(url, data=payload)
+    payload = {"chat_id": CHAT_ID, "text": texte, "parse_mode": "HTML"}
+    try:
+        requests.post(url, data=payload, timeout=10)
+    except Exception as e:
+        print(f"Erreur envoi message: {e}")
 
-def get_candles(interval="4h", outputsize=50):
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        "symbol": SYMBOL,
-        "interval": interval,
-        "outputsize": outputsize,
-        "apikey": TWELVEDATA_KEY
-    }
-    r = requests.get(url, params=params).json()
-    if "values" not in r:
-        print("Erreur API:", r)
-        return None
-    values = r["values"]
-    values.reverse()
-    closes = [float(v["close"]) for v in values]
-    highs = [float(v["high"]) for v in values]
-    lows = [float(v["low"]) for v in values]
-    return closes, highs, lows
+def recuperer_donnees():
+    """Récupère prix + RSI réel via TwelveData"""
+    try:
+        # Prix actuel
+        url_prix = f"https://api.twelvedata.com/price?symbol={SYMBOL}&apikey={TWELVEDATA_KEY}"
+        r_prix = requests.get(url_prix, timeout=10).json()
+        prix = float(r_prix["price"])
 
-def ema(data, period):
-    k = 2 / (period + 1)
-    ema_vals = [data[0]]
-    for price in data[1:]:
-        ema_vals.append(price * k + ema_vals[-1] * (1 - k))
-    return ema_vals
+        # RSI
+        url_rsi = f"https://api.twelvedata.com/rsi?symbol={SYMBOL}&interval={INTERVAL}&apikey={TWELVEDATA_KEY}"
+        r_rsi = requests.get(url_rsi, timeout=10).json()
+        rsi = float(r_rsi["values"][0]["rsi"])
 
-def rsi(data, period=14):
-    gains, losses = [], []
-    for i in range(1, len(data)):
-        diff = data[i] - data[i-1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return round(100 - (100 / (1 + rs)), 2)
+        return prix, rsi
+    except Exception as e:
+        print(f"Erreur récupération données: {e}")
+        return None, None
 
-def analyze(interval):
-    result = get_candles(interval)
-    if result is None:
-        return None
-    closes, highs, lows = result
+def calculer_taille_position(prix_entree, prix_sl):
+    risque_euros = CAPITAL * (RISK_PERCENT / 100)
+    distance_pips = abs(prix_entree - prix_sl)
+    if distance_pips == 0:
+        distance_pips = 1
+    taille_lot = round(risque_euros / (distance_pips * 100), 2)
+    taille_lot = max(0.01, min(taille_lot, 0.10))
+    return taille_lot, risque_euros
 
-    if len(closes) < 21:
-        return None
+def analyser_et_envoyer():
+    prix, rsi = recuperer_donnees()
 
-    ema9 = ema(closes, 9)
-    ema21 = ema(closes, 21)
-    current_rsi = rsi(closes)
-    price = closes[-1]
+    if prix is None or rsi is None:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Erreur données, on réessaie au prochain cycle")
+        return
 
     signal = None
-    if ema9[-1] > ema21[-1] and ema9[-2] <= ema21[-2] and current_rsi < 70:
-        signal = "🟢 ACHAT (BUY)"
-    elif ema9[-1] < ema21[-1] and ema9[-2] >= ema21[-2] and current_rsi > 30:
-        signal = "🔴 VENTE (SELL)"
+    if rsi < 30:
+        signal = "BUY"
+    elif rsi > 70:
+        signal = "SELL"
 
-    return {
-        "signal": signal,
-        "price": round(price, 2),
-        "rsi": current_rsi,
-        "ema9": round(ema9[-1], 2),
-        "ema21": round(ema21[-1], 2)
-    }
+    if signal is None:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Pas de signal (RSI: {rsi:.2f}, Prix: {prix})")
+        return
 
-def risk_management(price, signal):
-    sl_distance = 3.0  # $3 de distance SL sur XAUUSD
-    tp_distance = 6.0  # ratio 1:2
+    distance_sl = 3
+    distance_tp = 9
 
-    if "ACHAT" in signal:
-        sl = round(price - sl_distance, 2)
-        tp = round(price + tp_distance, 2)
+    if signal == "BUY":
+        prix_sl = prix - distance_sl
+        prix_tp = prix + distance_tp
+        emoji = "🟢"
+        action = "ACHAT (BUY)"
     else:
-        sl = round(price + sl_distance, 2)
-        tp = round(price - tp_distance, 2)
-    return sl, tp
+        prix_sl = prix + distance_sl
+        prix_tp = prix - distance_tp
+        emoji = "🔴"
+        action = "VENTE (SELL)"
 
-def run():
-    send_telegram("✅ Bot XAUUSD démarré avec succès !")
-    last_signal_h4 = None
-    last_signal_m5 = None
+    taille_lot, risque_euros = calculer_taille_position(prix, prix_sl)
+    gain_potentiel = risque_euros * 3
+
+    message = f"""
+{emoji} <b>SIGNAL {INTERVAL.upper()} — XAUUSD</b>
+
+➡️ <b>{action}</b>
+💰 Prix d'entrée: <b>{prix}</b>
+📊 RSI: {rsi:.2f}
+
+📦 Taille recommandée: <b>{taille_lot} lot</b>
+🎯 Take Profit: <b>{round(prix_tp, 2)}</b>
+🛑 Stop Loss: <b>{round(prix_sl, 2)}</b>
+
+💵 Risque: <b>{risque_euros:.2f}€</b>
+💎 Gain potentiel: <b>{gain_potentiel:.2f}€</b>
+
+👉 Ouvre Exness et passe l'ordre avec ces valeurs !
+⏰ {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+"""
+    envoyer_message(message)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Signal envoyé: {action} à {prix} (RSI: {rsi:.2f})")
+
+def message_demarrage():
+    texte = f"""
+🤖 <b>Bot de trading démarré !</b>
+
+📊 Paire: XAUUSD
+⏱️ Timeframe: {INTERVAL.upper()}
+💰 Capital: {CAPITAL}€
+⚠️ Risque par trade: {RISK_PERCENT}% ({CAPITAL * RISK_PERCENT / 100:.2f}€)
+
+✅ RSI en temps réel activé (TwelveData)
+
+Le bot va analyser le marché et t'envoyer des signaux fiables.
+Bon trade ! 🚀
+"""
+    envoyer_message(texte)
+
+# 🚀 BOUCLE PRINCIPALE
+if __name__ == "__main__":
+    message_demarrage()
+    print("Bot démarré ! Analyse en cours avec vraies données...")
 
     while True:
         try:
-            data_h4 = analyze("4h")
-            if data_h4 and data_h4["signal"] and data_h4["signal"] != last_signal_h4:
-                sl, tp = risk_management(data_h4["price"], data_h4["signal"])
-                msg = (
-                    f"🔔 *SIGNAL H4 — XAUUSD*\n\n"
-                    f"➡️ {data_h4['signal']}\n"
-                    f"💰 Prix actuel: {data_h4['price']}\n"
-                    f"📈 RSI: {data_h4['rsi']}\n"
-                    f"EMA9: {data_h4['ema9']} / EMA21: {data_h4['ema21']}\n\n"
-                    f"🎯 TP suggéré: {tp}\n"
-                    f"🛑 SL suggéré: {sl}\n\n"
-                    f"⚠️ Vérifie manuellement avant d'ouvrir sur MT5"
-                )
-                send_telegram(msg)
-                last_signal_h4 = data_h4["signal"]
-
-            data_m5 = analyze("5min")
-            if data_m5 and data_m5["signal"] and data_m5["signal"] != last_signal_m5:
-                sl, tp = risk_management(data_m5["price"], data_m5["signal"])
-                msg = (
-                    f"⚡ *SIGNAL M5 — XAUUSD*\n\n"
-                    f"➡️ {data_m5['signal']}\n"
-                    f"💰 Prix actuel: {data_m5['price']}\n"
-                    f"📈 RSI: {data_m5['rsi']}\n\n"
-                    f"🎯 TP suggéré: {tp}\n"
-                    f"🛑 SL suggéré: {sl}\n\n"
-                    f"⚠️ Signal court terme — sois prudent"
-                )
-                send_telegram(msg)
-                last_signal_m5 = data_m5["signal"]
-
+            analyser_et_envoyer()
         except Exception as e:
             print(f"Erreur: {e}")
 
-        time.sleep(60)
-
-if __name__ == "__main__":
-    run()
-
+        time.sleep(900)  # Vérifie toutes les 15 min (mais RSI reste basé sur H4)
