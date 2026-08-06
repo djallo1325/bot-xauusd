@@ -158,7 +158,10 @@ Tape /aide pour voir les commandes disponibles.
 def traiter_commande(texte):
     texte = texte.strip().lower()
 
-    if texte == "/prix":
+    if texte == "/start":
+        message_demarrage()
+
+    elif texte == "/prix":
         prix, rsi, ema50, ema200, macd, macd_signal = recuperer_toutes_donnees()
         if prix is None:
             envoyer_message("❌ Erreur lors de la récupération des données.")
@@ -190,6 +193,7 @@ def traiter_commande(texte):
         message = """
 📋 <b>Commandes disponibles :</b>
 
+/start - Redémarrer / message de bienvenue
 /prix - Voir le prix, RSI, EMA, MACD actuel
 /status - Vérifier que le bot fonctionne
 /aide - Afficher cette liste
@@ -200,6 +204,9 @@ Signal envoyé seulement si 3 conditions réunies :
 🔴 SELL: RSI > 65 + tendance baissière (EMA50<EMA200) + MACD baissier
 """
         envoyer_message(message)
+
+    else:
+        envoyer_message("❓ Commande inconnue. Tape /aide pour voir les commandes disponibles.")
 
 def ecouter_commandes():
     global dernier_update_id
