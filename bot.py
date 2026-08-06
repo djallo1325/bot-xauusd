@@ -22,20 +22,51 @@ def envoyer_message(texte):
     except Exception as e:
         print(f"Erreur envoi message: {e}")
 
-def recuperer_donnees():
+def recuperer_prix():
     try:
-        url_prix = f"https://api.twelvedata.com/price?symbol={SYMBOL}&apikey={TWELVEDATA_KEY}"
-        r_prix = requests.get(url_prix, timeout=10).json()
-        prix = float(r_prix["price"])
-
-        url_rsi = f"https://api.twelvedata.com/rsi?symbol={SYMBOL}&interval={INTERVAL}&apikey={TWELVEDATA_KEY}"
-        r_rsi = requests.get(url_rsi, timeout=10).json()
-        rsi = float(r_rsi["values"][0]["rsi"])
-
-        return prix, rsi
+        url = f"https://api.twelvedata.com/price?symbol={SYMBOL}&apikey={TWELVEDATA_KEY}"
+        r = requests.get(url, timeout=10).json()
+        return float(r["price"])
     except Exception as e:
-        print(f"Erreur récupération données: {e}")
+        print(f"Erreur prix: {e}")
+        return None
+
+def recuperer_rsi():
+    try:
+        url = f"https://api.twelvedata.com/rsi?symbol={SYMBOL}&interval={INTERVAL}&apikey={TWELVEDATA_KEY}"
+        r = requests.get(url, timeout=10).json()
+        return float(r["values"][0]["rsi"])
+    except Exception as e:
+        print(f"Erreur RSI: {e}")
+        return None
+
+def recuperer_ema(periode):
+    try:
+        url = f"https://api.twelvedata.com/ema?symbol={SYMBOL}&interval={INTERVAL}&time_period={periode}&apikey={TWELVEDATA_KEY}"
+        r = requests.get(url, timeout=10).json()
+        return float(r["values"][0]["ema"])
+    except Exception as e:
+        print(f"Erreur EMA{periode}: {e}")
+        return None
+
+def recuperer_macd():
+    try:
+        url = f"https://api.twelvedata.com/macd?symbol={SYMBOL}&interval={INTERVAL}&apikey={TWELVEDATA_KEY}"
+        r = requests.get(url, timeout=10).json()
+        macd = float(r["values"][0]["macd"])
+        signal = float(r["values"][0]["macd_signal"])
+        return macd, signal
+    except Exception as e:
+        print(f"Erreur MACD: {e}")
         return None, None
+
+def recuperer_toutes_donnees():
+    prix = recuperer_prix()
+    rsi = recuperer_rsi()
+    ema50 = recuperer_ema(50)
+    ema200 = recuperer_ema(200)
+    macd, macd_signal = recuperer_macd()
+    return prix, rsi, ema50, ema200, macd, macd_signal
 
 def calculer_taille_position(prix_entree, prix_sl):
     risque_euros = CAPITAL * (RISK_PERCENT / 100)
@@ -45,30 +76,57 @@ def calculer_taille_position(prix_entree, prix_sl):
     lot = risque_euros / (distance_pips * 1)
     return round(max(lot, 0.01), 2)
 
+def analyser_signal(prix, rsi, ema50, ema200, macd, macd_signal):
+    """Retourne 'BUY', 'SELL' ou None selon les 3 indicateurs"""
+    if None in (prix, rsi, ema50, ema200, macd, macd_signal):
+        return None
+
+    tendance_haussiere = ema50 > ema200
+    tendance_baissiere = ema50 < ema200
+
+    macd_haussier = macd > macd_signal
+    macd_baissier = macd < macd_signal
+
+    # BUY : RSI en survente + tendance haussière + MACD haussier
+    if rsi < 35 and tendance_haussiere and macd_haussier:
+        return "BUY"
+
+    # SELL : RSI en surachat + tendance baissière + MACD baissier
+    if rsi > 65 and tendance_baissiere and macd_baissier:
+        return "SELL"
+
+    return None
+
 def analyser_et_envoyer():
-    prix, rsi = recuperer_donnees()
-    if prix is None or rsi is None:
+    prix, rsi, ema50, ema200, macd, macd_signal = recuperer_toutes_donnees()
+    if prix is None:
         return
 
-    action = None
-    if rsi < 30:
-        action = "BUY"
+    action = analyser_signal(prix, rsi, ema50, ema200, macd, macd_signal)
+
+    if action == "BUY":
         prix_sl = prix - 5
         prix_tp = prix + 10
-    elif rsi > 70:
-        action = "SELL"
+    elif action == "SELL":
         prix_sl = prix + 5
         prix_tp = prix - 10
+    else:
+        print(f"Pas de signal - RSI:{rsi:.2f} EMA50:{ema50:.2f} EMA200:{ema200:.2f} MACD:{macd:.4f}")
+        return
 
-    if action:
-        lot = calculer_taille_position(prix, prix_sl)
-        risque_euros = CAPITAL * (RISK_PERCENT / 100)
-        gain_potentiel = risque_euros * 2
+    lot = calculer_taille_position(prix, prix_sl)
+    risque_euros = CAPITAL * (RISK_PERCENT / 100)
+    gain_potentiel = risque_euros * 2
 
-        message = f"""
+    tendance = "📈 Haussière" if ema50 > ema200 else "📉 Baissière"
+
+    message = f"""
 🚨 <b>SIGNAL {action}</b> 🚨
 
-📊 XAUUSD | RSI: {rsi:.2f}
+📊 XAUUSD | Tendance: {tendance}
+📈 RSI: <b>{rsi:.2f}</b>
+📊 MACD: <b>{macd:.4f}</b> / Signal: <b>{macd_signal:.4f}</b>
+
 💰 Prix d'entrée: <b>{round(prix, 2)}</b>
 📦 Taille lot: <b>{lot}</b>
 
@@ -78,59 +136,46 @@ def analyser_et_envoyer():
 💵 Risque: <b>{risque_euros:.2f}€</b>
 💎 Gain potentiel: <b>{gain_potentiel:.2f}€</b>
 
-👉 Ouvre Exness et passe l'ordre avec ces valeurs !
+✅ Confirmé par 3 indicateurs (RSI + EMA + MACD)
+
+👉 Ouvre Exness et passe l'ordre !
 ⏰ {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
 """
-        envoyer_message(message)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Signal envoyé: {action} à {prix} (RSI: {rsi:.2f})")
-    else:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Pas de signal - RSI: {rsi:.2f} (prix: {prix})")
+    envoyer_message(message)
 
 def message_demarrage():
-    texte = f"""
-🤖 <b>Bot de trading démarré !</b>
+    message = """
+🤖 <b>Bot Trading XAUUSD démarré !</b>
 
-📊 Paire: XAUUSD
-⏱️ Timeframe: {INTERVAL.upper()}
-💰 Capital: {CAPITAL}€
-⚠️ Risque par trade: {RISK_PERCENT}% ({CAPITAL * RISK_PERCENT / 100:.2f}€)
+✅ Connecté à Telegram
+✅ Analyse RSI + EMA50/200 + MACD
+✅ Vérification toutes les 15 min
 
-✅ RSI en temps réel activé (TwelveData)
-
-<b>Commandes disponibles :</b>
-/prix - Voir le prix et RSI actuel
-/status - Vérifier que le bot tourne
-/aide - Liste des commandes
-
-Le bot va analyser le marché et t'envoyer des signaux fiables.
-Bon trade ! 🚀
+Tape /aide pour voir les commandes disponibles.
 """
-    envoyer_message(texte)
+    envoyer_message(message)
 
 def traiter_commande(texte):
     texte = texte.strip().lower()
 
-    if texte == "/start":
-        message_demarrage()
-
-    elif texte == "/prix":
-        prix, rsi = recuperer_donnees()
+    if texte == "/prix":
+        prix, rsi, ema50, ema200, macd, macd_signal = recuperer_toutes_donnees()
         if prix is None:
-            envoyer_message("❌ Erreur lors de la récupération des données. Réessaie dans un instant.")
+            envoyer_message("❌ Erreur lors de la récupération des données.")
             return
 
-        if rsi < 30:
-            statut = "🟢 Zone de SURVENTE (achat possible)"
-        elif rsi > 70:
-            statut = "🔴 Zone de SURACHAT (vente possible)"
-        else:
-            statut = "⚪ Zone neutre (pas de signal)"
+        tendance = "📈 Haussière" if ema50 > ema200 else "📉 Baissière"
+        action = analyser_signal(prix, rsi, ema50, ema200, macd, macd_signal)
+        statut = f"🟢 Signal {action} actif !" if action else "⚪ Aucun signal pour le moment"
 
         message = f"""
 📊 <b>XAUUSD - État actuel</b>
 
 💰 Prix: <b>{round(prix, 2)}</b>
 📈 RSI ({INTERVAL}): <b>{rsi:.2f}</b>
+📊 EMA50: <b>{ema50:.2f}</b> | EMA200: <b>{ema200:.2f}</b>
+📉 Tendance: {tendance}
+🔢 MACD: <b>{macd:.4f}</b> / Signal: <b>{macd_signal:.4f}</b>
 
 {statut}
 
@@ -145,13 +190,14 @@ def traiter_commande(texte):
         message = """
 📋 <b>Commandes disponibles :</b>
 
-/prix - Voir le prix et RSI actuel de XAUUSD
+/prix - Voir le prix, RSI, EMA, MACD actuel
 /status - Vérifier que le bot fonctionne
 /aide - Afficher cette liste
 
-Le bot t'envoie automatiquement un signal quand :
-🟢 RSI < 30 (survente → BUY)
-🔴 RSI > 70 (surachat → SELL)
+📌 <b>Stratégie du bot :</b>
+Signal envoyé seulement si 3 conditions réunies :
+🟢 BUY: RSI < 35 + tendance haussière (EMA50>EMA200) + MACD haussier
+🔴 SELL: RSI > 65 + tendance baissière (EMA50<EMA200) + MACD baissier
 """
         envoyer_message(message)
 
